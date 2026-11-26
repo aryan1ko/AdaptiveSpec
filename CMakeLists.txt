@@ -30,3 +30,12 @@ endfunction()
 aspec_metal_exe(metal_check src/metal_check.mm)
 
 aspec_metal_exe(roofline_probe src/roofline_probe.mm)
+
+# Pure-C++ reference path (no Metal): the oracle every GPU kernel is validated against.
+add_library(aspec_q4_0 STATIC src/q4_0.cpp)
+target_link_libraries(aspec_q4_0 PUBLIC aspec_core)
+
+enable_testing()
+add_executable(test_q4_0 tests/test_q4_0.cpp)
+target_link_libraries(test_q4_0 PRIVATE aspec_q4_0)
+add_test(NAME q4_0 COMMAND test_q4_0)
