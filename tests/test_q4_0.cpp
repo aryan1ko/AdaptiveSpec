@@ -1,7 +1,7 @@
 //
-// Correctness tests for the Q4_0 reference path. The Layout test is the one that
-// matters most: it pins the exact bytes against hand-computed expectations derived from
-// ggml's quantize_row_q4_0_ref, so passing it means we can load real GGUF weights.
+// Correctness tests for the Q4_0 reference path. test_layout matters most: it pins exact
+// bytes against hand-computed expectations from ggml's quantize_row_q4_0_ref, so passing
+// it means real GGUF weights will load.
 //
 #include "aspec/q4_0.hpp"
 
@@ -66,8 +66,8 @@ void check_near(float got, float want, float tol, const char* what, int idx) {
 //         qs[3] = 12 | (4 << 4) = 0x4C
 //   else: both halves 0 -> 8 | (8 << 4) = 0x88
 //
-// Note this is also the test that catches the classic mistake of packing weights
-// 2j/2j+1 into byte j instead of weights j/j+16.
+// This also catches the common mistake of packing weights 2j/2j+1 into byte j instead
+// of weights j/j+16.
 // ---------------------------------------------------------------------------
 void test_layout() {
     begin_test("test_layout");
@@ -97,12 +97,11 @@ void test_layout() {
 // ---------------------------------------------------------------------------
 // Test 2: round-trip error bound on random data.
 //
-// |d| = amax/8 and q-8 = round(x/d), so for a typical element the error is at most
-// |d|/2 = amax/16. The asymmetric range (-8..7) means an element whose magnitude equals
-// amax but whose sign is opposite to `max` saturates at q=15 and can reach amax/8, so
-// amax/8 is the correct hard bound. We additionally require the MEAN error to sit well
-// under amax/16, which is what actually catches a subtly wrong implementation that the
-// loose hard bound would let through.
+// |d| = amax/8 and q-8 = round(x/d), so a typical element errs by at most |d|/2 =
+// amax/16. The asymmetric range (-8..7) means an element with magnitude amax but sign
+// opposite to `max` saturates at q=15 and can reach amax/8, so amax/8 is the hard bound.
+// The mean check is what actually catches a subtly wrong implementation; the hard bound
+// alone is too loose.
 // ---------------------------------------------------------------------------
 void test_roundtrip_bound() {
     begin_test("test_roundtrip_bound");
@@ -145,8 +144,8 @@ void test_roundtrip_bound() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: the element of largest magnitude maps to q=0 and dequantizes to exactly
-// -8*d == max, so it must survive the round trip up to fp16 rounding of d.
+// Test 3: the largest-magnitude element maps to q=0 and dequantizes to -8d == max, so
+// it must survive the round trip apart from fp16 rounding of d.
 // ---------------------------------------------------------------------------
 void test_max_element_exact() {
     begin_test("test_max_element_exact");
@@ -175,9 +174,8 @@ void test_max_element_exact() {
 // ---------------------------------------------------------------------------
 // Test 4: gemv_q4_0_ref agrees with dequantize-then-plain-fp32-GEMV.
 //
-// Shapes mirror a real Qwen2.5-3B decode GEMV (K = 2048 = hidden size), with N kept
-// small so the test stays fast. R sweeps 1..5: R=1 is ordinary decode, R>1 is what
-// speculative verification produces and what llama.cpp calls ne11.
+// K = 2048 is Qwen2.5-3B's hidden size; N is kept small so the test stays fast. R=1 is
+// plain decode, R>1 is what speculative verification produces (llama.cpp's ne11).
 // ---------------------------------------------------------------------------
 void test_gemv_matches_dequantized() {
     begin_test("test_gemv_matches_dequantized");
@@ -218,8 +216,8 @@ void test_gemv_matches_dequantized() {
             max_ref  = std::max(max_ref, std::fabs(Yref[i]));
             max_diff = std::max(max_diff, std::fabs(Y[i] - Yref[i]));
         }
-        // Non-degeneracy first. With a stubbed dequantize, Wdq stays all-zero, Yref
-        // is all-zero, and a max_diff==0 comparison would "pass" while proving nothing.
+        // Non-degeneracy first: with dequantize stubbed, Wdq and Yref are all-zero and
+        // a max_diff==0 comparison "passes" while proving nothing.
         ++g_checks;
         if (!(max_ref > 1e-3f)) {
             ++g_failures;

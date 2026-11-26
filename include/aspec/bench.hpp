@@ -1,13 +1,11 @@
 #pragma once
 //
-// Measurement harness. Every number this project reports flows through here, so the
-// rigor requirements live in one place:
-//   - warmup iterations excluded from statistics
-//   - many timed reps, reported as median / p95 / p99 / min (never mean alone: a single
-//     thermal excursion or scheduler hiccup moves a mean and leaves a median alone)
-//   - randomized trial order for sweeps, so a monotonic thermal drift cannot masquerade
-//     as a monotonic trend in the independent variable
-//   - fixed seeds
+// Measurement harness. Every number in this project goes through here.
+//
+// The target is a fanless 8 GB laptop, so the defaults exist for specific reasons:
+// warmup is excluded, stats are reported as median/p95/p99 rather than a mean (one
+// thermal excursion moves a mean and leaves a median alone), and sweeps visit their
+// parameter in randomized order so thermal drift can't look like a real trend.
 //
 #include <algorithm>
 #include <cmath>
@@ -20,14 +18,11 @@
 
 namespace aspec {
 
-// ---------------------------------------------------------------------------- Stats
-
 struct Stats {
     double min = 0, median = 0, mean = 0, p95 = 0, p99 = 0, stddev = 0;
     std::size_t n = 0;
 
-    // xs is taken by value: we sort it.
-    static Stats from(std::vector<double> xs) {
+    static Stats from(std::vector<double> xs) {   // by value: we sort it
         Stats s;
         if (xs.empty()) return s;
         std::sort(xs.begin(), xs.end());
@@ -43,15 +38,12 @@ struct Stats {
         return s;
     }
 
-    // Spread of the middle of the distribution, as a fraction of the median. A large
-    // value means the measurement is not steady-state and the number should not be
-    // quoted. Deliberately uses p95 rather than max: we expect rare OS-scheduling
-    // outliers and do not want them to condemn an otherwise clean run.
+    // Spread of the middle of the distribution as a fraction of the median. High means
+    // the measurement isn't steady-state and shouldn't be quoted. Uses p95 rather than
+    // max so a rare scheduling outlier doesn't condemn a clean run.
     double instability() const { return median > 0 ? (p95 - min) / median : 0.0; }
 
 private:
-    // Linear interpolation between order statistics (same convention as numpy's
-    // default 'linear' method) on an already-sorted vector.
     static double quantile_sorted(const std::vector<double>& sorted, double q) {
         if (sorted.size() == 1) return sorted[0];
         const double pos = q * double(sorted.size() - 1);
@@ -62,13 +54,8 @@ private:
     }
 };
 
-// ------------------------------------------------------------------------- Timing
-
-// Calls fn() `warmup` times discarding results, then `reps` times collecting them.
-// fn must return the duration of one iteration in seconds. Returning the duration
-// rather than measuring around fn lets callers report GPU-timestamp time (from
-// MTLCommandBuffer GPUStartTime/GPUEndTime) instead of wall clock, which includes
-// CPU-side encode and dispatch latency.
+// fn returns the duration of one iteration in seconds. Returning it rather than timing
+// around fn lets callers report GPU-timestamped time instead of wall clock.
 inline std::vector<double> timed_reps(int warmup, int reps,
                                       const std::function<double()>& fn) {
     for (int i = 0; i < warmup; ++i) (void)fn();
@@ -78,11 +65,7 @@ inline std::vector<double> timed_reps(int warmup, int reps,
     return out;
 }
 
-// ------------------------------------------------------------- Sweep ordering
-
-// A shuffled visiting order over [0, n). Use this for every parameter sweep: measuring
-// ne11 = 1,2,3,...,16 in order on a thermally-throttling laptop manufactures a fake
-// upward trend. Seeded, so a sweep is reproducible.
+// Shuffled visiting order over [0, n). Seeded, so sweeps stay reproducible.
 inline std::vector<std::size_t> shuffled_order(std::size_t n, std::uint64_t seed = 0xA5EC) {
     std::vector<std::size_t> idx(n);
     std::iota(idx.begin(), idx.end(), std::size_t{0});
@@ -91,13 +74,11 @@ inline std::vector<std::size_t> shuffled_order(std::size_t n, std::uint64_t seed
     return idx;
 }
 
-// ------------------------------------------------------------------- Derived units
-
 inline double gib_per_s(double bytes, double seconds) {
     return bytes / seconds / (1024.0 * 1024.0 * 1024.0);
 }
 inline double gb_per_s(double bytes, double seconds) {
-    return bytes / seconds / 1e9;   // vendor bandwidth specs are decimal GB/s
+    return bytes / seconds / 1e9;   // vendor specs are decimal GB/s
 }
 inline double gflop_per_s(double flops, double seconds) {
     return flops / seconds / 1e9;

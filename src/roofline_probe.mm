@@ -1,15 +1,11 @@
 //
-// roofline_probe -- measure, rather than quote, this machine's two roofline parameters.
+// Measure this machine's two roofline parameters instead of quoting them:
+//   1. streaming-read bandwidth, swept across footprint so the SLC cliff is visible
+//   2. peak FP32 FMA throughput, register-resident so no memory traffic intrudes
 //
-//   1. Peak achievable streaming-read bandwidth, swept across footprint so the
-//      system-level-cache cliff is visible. This matters concretely: a single
-//      Qwen2.5-3B Q4_0 weight tensor is only a few MB, so whether a decode GEMV
-//      streams from SLC or from DRAM changes how every later number is interpreted.
-//   2. Peak FP32 FMA throughput, register-resident so no memory traffic intrudes.
-//
-// Their ratio is the ridge point, which tells us the row count at which a Q4_0 GEMV
-// stops being memory-bound. That row count is the draft length a speculative decoder
-// should be using -- the whole premise of the project (see docs/DECISIONS.md P1-P4).
+// Their ratio is the ridge point, which gives the column count at which a Q4_0 GEMV
+// stops being memory-bound. A Qwen2.5-3B weight tensor is only a few MB, so whether a
+// decode GEMV streams from DRAM or hits the SLC changes how every later number reads.
 //
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -32,17 +28,17 @@ using namespace metal;
 struct BwArgs  { uint n4; uint stride; uint passes; };
 struct FmaArgs { uint iters; float b; float c; };
 
-// Fill with gid-derived values: never let a constant-valued buffer give the memory
-// system an opportunity to do something clever.
+// gid-derived values, so a constant-valued buffer can't let the memory system do
+// anything clever.
 kernel void bw_fill(device float4*   dst  [[buffer(0)]],
                     uint             gid  [[thread_position_in_grid]])
 {
     dst[gid] = float4(float(gid), float(gid) + 1.0f, float(gid) + 2.0f, float(gid) + 3.0f);
 }
 
-// Streaming read. Consecutive threads touch consecutive float4s, so each simdgroup
-// issues one fully-coalesced 512 B transaction per step. `acc` is written out so the
-// loads cannot be eliminated; the write is grid-sized, i.e. <1% of the read volume.
+// Consecutive threads touch consecutive float4s, so each simdgroup issues one coalesced
+// 512 B transaction per step. acc is written out so the loads can't be eliminated; that
+// write is grid-sized, under 1% of the read volume.
 kernel void bw_read(device const float4*  src  [[buffer(0)]],
                     device float*         sink [[buffer(1)]],
                     constant BwArgs&      a    [[buffer(2)]],
@@ -57,10 +53,10 @@ kernel void bw_read(device const float4*  src  [[buffer(0)]],
     sink[gid] = acc.x + acc.y + acc.z + acc.w;
 }
 
-// Eight independent FMA chains: enough instruction-level parallelism to keep the FP32
-// pipeline fed, while each chain stays a true loop-carried dependency. b and c arrive
-// through a buffer so the compiler cannot constant-fold the recurrence away, and the
-// trip count is a runtime value so the loop cannot be fully unrolled.
+// Eight independent FMA chains: enough ILP to keep the FP32 pipeline fed while each
+// chain stays a real loop-carried dependency. b and c come through a buffer so the
+// recurrence can't be constant-folded, and the trip count is runtime so the loop can't
+// be unrolled away.
 kernel void fma_peak(device float*     out  [[buffer(0)]],
                      constant FmaArgs& a    [[buffer(1)]],
                      uint              gid  [[thread_position_in_grid]])
@@ -105,9 +101,9 @@ id<MTLComputePipelineState> make_pipeline(id<MTLDevice> dev, id<MTLLibrary> lib,
     return pso;
 }
 
-// Submit one dispatch and return its GPU-timestamped duration in seconds. GPU
-// timestamps exclude CPU-side encode and submission latency, which is what we want
-// when characterizing a kernel rather than an end-to-end pipeline.
+// One dispatch, returning its GPU-timestamped duration in seconds. GPU timestamps
+// exclude CPU-side encode and submission, which is what we want when characterizing a
+// kernel rather than a pipeline.
 double run_once(id<MTLCommandQueue> q, id<MTLComputePipelineState> pso,
                 NSUInteger grid, NSUInteger tg,
                 const std::vector<std::pair<NSUInteger, id<MTLBuffer>>>& buffers,
@@ -156,10 +152,9 @@ int main() {
 
     // ---------------------------------------------------------------- bandwidth
     //
-    // One 512 MB private allocation, read back at a range of footprints. Grid is fixed
-    // at 65536 threads (256 threadgroups of 256) so occupancy is constant across the
-    // sweep and only the footprint varies; that fixes the smallest measurable footprint
-    // at 65536 * 16 B = 1 MiB.
+    // One 512 MB allocation read back at a range of footprints. Grid fixed at 65536
+    // threads so occupancy stays constant and only footprint varies, which puts the
+    // smallest measurable footprint at 65536 * 16 B = 1 MiB.
     constexpr NSUInteger kGrid = 65536, kTG = 256;
     constexpr std::size_t kMaxBytes = 512ull * 1024 * 1024;
     constexpr double kTargetBytes = 512.0 * 1024 * 1024;   // work per rep, for timer resolution
@@ -179,15 +174,12 @@ int main() {
     std::printf("%10s  %8s  %10s  %10s  %9s\n",
                 "footprint", "rd/thr", "GB/s", "GiB/s", "instab");
 
-    // Two bandwidths matter, and conflating them is a trap. Weight tensors in
-    // Qwen2.5-3B Q4_0 range from 2.4 MB (attention projections) to 12.7 MB (FFN), so a
-    // microbenchmark that hammers one tensor repeatedly measures cache-resident
-    // bandwidth and overstates decode throughput by nearly an order of magnitude. A
-    // real forward pass streams ~1.7 GB per token and evicts everything, so the
-    // *streaming* plateau is what governs decode. We report both.
+    // Two bandwidths matter and conflating them is a trap. Qwen2.5-3B Q4_0 tensors run
+    // 0.28 to 12.09 MiB, so a benchmark that hammers one tensor measures cache-resident
+    // bandwidth and overstates decode by ~10x. A real forward pass streams 1.45 GiB per
+    // token and evicts everything, so the streaming plateau governs decode. Report both.
 
-    // Randomized footprint order: a monotonic thermal drift must not be able to
-    // impersonate a monotonic trend in footprint.
+    // Randomized order, so thermal drift can't impersonate a footprint trend.
     const auto order = aspec::shuffled_order(footprints_mib.size());
     std::vector<double> bw_result(footprints_mib.size(), 0.0);
     std::vector<double> bw_instab(footprints_mib.size(), 0.0);
@@ -239,9 +231,8 @@ int main() {
 
     // --------------------------------------------------------------- ridge point
     //
-    // Streaming bandwidth = median of the DRAM plateau (footprints that cannot be held
-    // in the 8 MB system-level cache). Cache-resident bandwidth = best clean
-    // sub-SLC point, excluding any footprint our own instability metric distrusts.
+    // Streaming = median of the DRAM plateau. Resident = best clean sub-SLC point,
+    // excluding anything the instability metric distrusts.
     std::vector<double> plateau, resident;
     for (std::size_t i = 0; i < footprints_mib.size(); ++i) {
         if (bw_instab[i] > 0.50) continue;                       // distrust noisy points

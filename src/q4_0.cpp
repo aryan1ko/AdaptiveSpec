@@ -1,15 +1,12 @@
 #include "aspec/q4_0.hpp"
 
-// =============================================================================
-//  YOUR TURN. Implement these three against the spec in include/aspec/q4_0.hpp
-//  and the tests in tests/test_q4_0.cpp.
+// Implement against the spec in include/aspec/q4_0.hpp and the tests in
+// tests/test_q4_0.cpp:
 //
-//      cmake --build build && ./build/test_q4_0
+//     cmake --build build && ./build/test_q4_0
 //
-//  Order I'd suggest: quantize -> dequantize -> gemv. The first test that passes
-//  (Layout) proves you have the nibble interleaving right, which is the only part
-//  with a real gotcha.
-// =============================================================================
+// Order: quantize, dequantize, gemv. test_layout passing proves the nibble
+// interleaving is right, which is the only part with a real gotcha.
 
 namespace aspec {
 
