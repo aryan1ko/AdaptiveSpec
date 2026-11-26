@@ -28,3 +28,5 @@ function(aspec_metal_exe name src)
 endfunction()
 
 aspec_metal_exe(metal_check src/metal_check.mm)
+
+aspec_metal_exe(roofline_probe src/roofline_probe.mm)
