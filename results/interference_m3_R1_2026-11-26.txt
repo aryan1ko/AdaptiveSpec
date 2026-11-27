@@ -1,0 +1,66 @@
+device  : Apple M3
+R       : 1 column
+SLC     : 8 MB (M3)
+
+--- correctness (every weight = 1, x = 1, so Y must equal K) ---
+  q_proj     K= 2048 N= 2048    2.25 MiB  max|err| 0  PASS
+  k_proj     K= 2048 N=  256    0.28 MiB  max|err| 0  PASS
+  v_proj     K= 2048 N=  256    0.28 MiB  max|err| 0  PASS
+  o_proj     K= 2048 N= 2048    2.25 MiB  max|err| 0  PASS
+  gate_proj  K= 2048 N=11008   12.09 MiB  max|err| 0  PASS
+  up_proj    K= 2048 N=11008   12.09 MiB  max|err| 0  PASS
+  down_proj  K=11008 N= 2048   12.09 MiB  max|err| 0  PASS
+
+--- per-operator cost, measured in isolation (what greedy is calibrated on) ---
+tensor          MiB      us/op     reps    instab     eff GB/s
+q_proj         2.25      22.67      312        1%        104.1
+k_proj         0.28       4.75     4337        3%         62.0
+v_proj         0.28       4.74     4260        2%         62.2
+o_proj         2.25      22.57      982        1%        104.5
+gate_proj     12.09     137.39      206       10%         92.3
+up_proj       12.09     135.19      205        3%         93.8
+down_proj     12.09     139.36      198       10%         91.0
+
+--- effective GB/s on weights: lane mapping x simdgroups-per-threadgroup ---
+  block-per-lane (8 weights per load, uncoalesced X)
+    tensor          MiB        1        2        4        8       16       32
+    q_proj         2.25    104.0    103.9    104.0    103.6    103.1     97.4
+    k_proj         0.28     71.0     69.9     66.8     62.0     60.8     60.1
+    v_proj         0.28     71.6     70.1     67.1     62.4     61.2     60.6
+    o_proj         2.25    104.1    104.9    105.1    104.6    103.8     98.9
+    gate_proj     12.09     93.9     92.0     92.1     93.9     92.7     82.9
+    up_proj       12.09     93.5     94.5     92.9     93.2     89.8     91.9
+    down_proj     12.09     91.5     91.8     90.8     91.2     91.2     86.5
+  weight-per-lane (1 weight per load, coalesced X)
+    tensor          MiB        1        2        4        8       16       32
+    q_proj         2.25     35.7     35.8     35.5     35.4     35.5     33.1
+    k_proj         0.28     25.7     26.0     23.7     20.6     20.4     20.3
+    v_proj         0.28     25.8     25.9     23.7     20.5     20.4     20.3
+    o_proj         2.25     36.0     36.1     35.7     35.7     35.6     33.2
+    gate_proj     12.09     38.5     38.5     38.4     38.3     38.4     37.8
+    up_proj       12.09     38.5     38.5     38.5     38.4     38.4     37.8
+    down_proj     12.09     36.5     36.4     36.1     36.0     36.2     33.9
+  (llama.cpp hardcodes nsg=2 for every tensor)
+
+--- per-operator cost at each tensor's best configuration ---
+tensor          MiB      us/op    instab   eff GB/s  best cfg  regime
+q_proj         2.25      22.54        0%      104.7  lm0/nsg4  near the DRAM roof
+k_proj         0.28       4.16        0%       71.0  lm0/nsg1  ALU-BOUND
+v_proj         0.28       4.13        1%       71.5  lm0/nsg1  ALU-BOUND
+o_proj         2.25      22.51        1%      104.8  lm0/nsg4  near the DRAM roof
+gate_proj     12.09     133.50        6%       95.0  lm0/nsg1  near the DRAM roof
+up_proj       12.09     134.66        5%       94.2  lm0/nsg2  near the DRAM roof
+down_proj     12.09     137.41        2%       92.3  lm0/nsg2  near the DRAM roof
+
+--- additivity: measured sequence vs sum of isolated costs ---
+sequence                                      measured  greedy sum       gap   instab
+gate_proj+up_proj+down_proj                   411.35 us    405.57 us     +1.4%       2%
+q_proj+k_proj+v_proj                           32.14 us     30.82 us     +4.3%       1%
+q_proj+gate_proj                              163.02 us    156.04 us     +4.5%       9%
+q_proj+k_proj+v_proj+o_proj+gate_proj+up_proj+down_proj    495.19 us    458.90 us     +7.9%      21%
+
+--- verdict ---
+  largest additivity gap : +7.9%  (q_proj+k_proj+v_proj+o_proj+gate_proj+up_proj+down_proj)
+  worst per-op instability: 6%
+  => cost is approximately additive on these shapes; per-operator
+     optimization is close to optimal and plan selection buys little

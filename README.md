@@ -1,12 +1,30 @@
 # AdaptiveSpec
 
-Small-batch quantized matmul dispatch on Apple Silicon, and the speculative decoding
-draft length, both chosen from measurement rather than from fixed constants.
+Cost-based execution plan selection for a transformer subgraph on Apple Silicon, chosen
+from measurement rather than from compile-time constants.
 
-**Approach.** Measure the real cost of verifying γ tokens on a given machine, fit a model
-that predicts it, and use that model to select both the GPU kernel configuration and the
-draft length at runtime — replacing compile-time constants that cannot account for tensor
-footprint or the characteristics of the target GPU.
+**Approach.** Measure the real cost of executing a transformer subgraph on a given
+machine, fit a model that predicts it, and use that model to select the execution plan —
+kernel configuration, fusion boundaries, intermediate layouts — at runtime, replacing
+compile-time constants that cannot account for tensor footprint or the characteristics of
+the target GPU.
+
+**Why the plan has to be chosen jointly.** The obvious approach is greedy: pick the best
+kernel configuration for each operator, then decide which operators to fuse. That gets
+the wrong answer, because fusing changes the shape of the work and invalidates the
+configurations you just picked. Concretely, the best number of simdgroups per threadgroup
+depends on how many output rows an operator has, since too few threadgroups leaves GPU
+cores idle:
+
+| Plan | Output rows | Consequence |
+|---|---|---|
+| separate Q, K, V matmuls | 2048, 256, 256 | three different best configurations |
+| fused QKV matmul | 2560 | one, different, best configuration |
+
+A greedy optimizer commits to per-operator configurations before it knows the fusion
+boundaries, so its choices are stale by the time it decides them. Fusion and
+configuration have to be enumerated together. That is the argument for cost-based plan
+selection over per-kernel autotuning, and it is directly measurable.
 
 ## Problem
 
@@ -32,10 +50,37 @@ Week 1 of 4.
 
 - [x] Measurement harness
 - [x] Measured roofline (M3)
+- [x] **Non-additivity gate** — done; result below redirected the project
 - [ ] Q4_0 reference path — spec and tests done, implementation in progress
 - [ ] Parameterized Metal kernel variants
-- [ ] Cost model and draft-length controller
+- [ ] Cost model and plan enumeration over one subgraph
 - [ ] llama.cpp integration, end-to-end tok/s
+
+### The gate, and what it found
+
+Plan-level optimization is only worth building if operator costs are **not additive**. If
+`cost(A then B) == cost(A) + cost(B)`, optimizing each operator independently is provably
+optimal. `src/interference_probe.mm` measured it: the gap is **+4.5% at R=1 and +1.2% at
+R=4**, at 0-2% instability. Costs are additive on these shapes, so that direction was
+dropped (`docs/DECISIONS.md` D3).
+
+The same experiment found where the leverage actually is:
+
+| Effect | Size |
+|---|---|
+| lane mapping inside one kernel | **2.9x** |
+| R=1 -> R=4 cost, vs the roofline ideal of free | **3.1x vs 1.0x** |
+| plan-level operator interaction | 1-5% |
+
+And it confirmed EXP-001's prediction directly. The 12.09 MiB FFN tensors exceed the 8 MB
+cache, stream from DRAM, and already run at the 89-95 GB/s roof — nothing to win. The
+2.25 MiB attention projections fit the cache and should be able to reach ~913 GB/s, but
+run at 104.7, i.e. **11% of their roof**: they are compute-bound on dequantization, not
+bandwidth-bound.
+
+That is why extra columns cost 77-90% of full price instead of being nearly free, and the
+"verification is almost free" premise that speculative decoding rests on does not
+currently hold on this hardware. Closing that gap is the problem the project now targets.
 
 ## Measured
 

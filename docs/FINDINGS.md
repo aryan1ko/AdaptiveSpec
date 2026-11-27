@@ -95,3 +95,98 @@ so measured throughput has to be lower.
 | P2 discontinuity at `ne11`=9 | untested |
 | P3 `nsg`=2 too low | untested, the roofline says nothing about simdgroup count |
 | P4 `ne11 < 3` gate too conservative | testable as written: all 7 decode tensors have K divisible by 256, so that gate is the only thing blocking `nxpsg`=16 for the whole model |
+
+## EXP-002: Non-additivity gate
+2026-11-26 · `src/interference_probe.mm` · `results/interference_m3_R{1,4}_2026-11-26.txt`
+
+### Question
+Plan selection is only worth building if `cost(A then B) != cost(A) + cost(B)`. If costs
+are additive, per-operator optimization is provably optimal and a plan optimizer is
+decoration.
+
+### Method
+A real Q4_0 GEMV (split layout: quants and scales in separate arrays, same 0.5625
+B/weight footprint as packed, but aligned and vectorizable). Correctness is analytic:
+every weight set to 1 and every activation to 1, so each output must equal K. All seven
+Qwen2.5-3B decode tensors pass with zero error.
+
+Sequences are encoded repeated M times inside ONE command buffer, M chosen so each
+measurement runs ~30 ms. `T([A])` is A back-to-back, which is what a per-operator
+microbenchmark reports and therefore what a greedy optimizer is calibrated on.
+`gap = T([A,B]) - (T([A]) + T([B]))`.
+
+Two kernel knobs are exposed as Metal function constants, so one source specializes into
+many pipelines: simdgroups per threadgroup (llama.cpp's `nsg`) and lane mapping.
+
+A first design timed single operators in separate command buffers under cold / warm /
+evicted preconditions. It produced ratios below 1.0 (cold apparently faster than warm) and
+instability up to 85%. The cause was GPU clock state, not cache state: the 64 MB flush
+left the GPU at high clocks so whatever ran next looked fast, and the 5.5 us
+per-command-buffer floor exceeded the cost of the smaller operators. Discarded.
+
+### Result 1: costs are additive
+
+| Sequence | R=1 gap | R=4 gap |
+|---|---|---|
+| gate+up+down (the FFN) | +1.4% | +0.9% |
+| q+k+v | +4.3% | +1.2% |
+| q+gate (small + large) | +4.5% | +0.1% |
+| whole layer, 7 operators | +7.9% (21% instability, distrust) | +1.1% |
+
+Largest trustworthy gap: **+4.5% at R=1, +1.2% at R=4**, at 0-2% instability. Execution
+history does not meaningfully change operator cost on these shapes.
+
+### Result 2: lane mapping is worth 2.9x
+Two mappings of identical arithmetic, effective GB/s on the weight stream:
+
+| Mapping | q_proj | gate_proj |
+|---|---|---|
+| block-per-lane (one 4-byte load feeds 8 weights; X read uncoalesced) | **104.7** | **95.0** |
+| weight-per-lane (one load per weight; X read fully coalesced) | 35.8 | 38.5 |
+
+Amortizing the nibble unpack beats coalescing the activation read by **2.9x**. Coalescing
+X was an attempted fix for Result 3 and made things three times worse.
+
+### Result 3: only the large tensors are memory-bound
+Against EXP-001's two reference points, 89 GB/s streaming and 913 GB/s cache-resident:
+
+| Tensor | MiB | best GB/s | vs its own roof |
+|---|---|---|---|
+| gate/up/down_proj | 12.09 | 92-95 | **at the DRAM roof** |
+| q/o_proj | 2.25 | 104.7 | 11% of the 913 GB/s resident roof |
+| k/v_proj | 0.28 | 71.0 | 8% of resident roof |
+
+The 12 MiB tensors exceed the 8 MB SLC, stream from DRAM, and are already at the roof:
+there is nothing to win there. The smaller tensors fit the SLC and are **compute-bound on
+dequantization**, leaving up to **8.7x** of headroom.
+
+This confirms EXP-001's prediction directly rather than by inference. EXP-001 computed a
+resident ridge point of 3.1 FLOP/byte against a Q4_0 GEMV intensity of 3.56 FLOP/byte at
+R=1 and concluded the resident regime is "ALREADY COMPUTE-BOUND at ne11=1". It is.
+
+### Result 4: extra columns are not free, which undercuts the speculative premise
+EXP-001's roofline said columns should be nearly free up to 9. Measured cost of going from
+R=1 to R=4, where free would be 1.0x and full price 4.0x:
+
+| Tensor | R=1 | R=4 | ratio |
+|---|---|---|---|
+| gate_proj | 133.5 us | 410.6 us | **3.08x** |
+| q_proj | 22.5 us | 81.4 us | **3.61x** |
+
+So 77-90% of full price. At R=4 every tensor is ALU-bound (23-31 GB/s effective). The
+"verification is nearly free" premise behind speculative decoding holds only for a kernel
+good enough to stay memory-bound as R grows. This one is not.
+
+### Result 5: P3 is not supported
+`nsg` swept over {1,2,4,8,16,32}. llama.cpp's hardcoded `nsg=2` is within **2%** of the
+best value for all seven tensors (worst case gate_proj, 92.0 vs 93.9 GB/s at nsg=1). Only
+`nsg=32` is consistently worse. The prediction that `nsg=2` would prove too low on M3 is
+withdrawn.
+
+### Prediction status
+| | |
+|---|---|
+| P1 `T(ne11)` non-monotonic | untested; needs the llama.cpp `r1ptg` table, not our kernel |
+| P2 discontinuity at `ne11`=9 | untested |
+| P3 `nsg`=2 too low | **not supported** (within 2% of best everywhere) |
+| P4 `ne11 < 3` gate too conservative | untested |

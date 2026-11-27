@@ -1,0 +1,66 @@
+device  : Apple M3
+R       : 4 columns
+SLC     : 8 MB (M3)
+
+--- correctness (every weight = 1, x = 1, so Y must equal K) ---
+  q_proj     K= 2048 N= 2048    2.25 MiB  max|err| 0  PASS
+  k_proj     K= 2048 N=  256    0.28 MiB  max|err| 0  PASS
+  v_proj     K= 2048 N=  256    0.28 MiB  max|err| 0  PASS
+  o_proj     K= 2048 N= 2048    2.25 MiB  max|err| 0  PASS
+  gate_proj  K= 2048 N=11008   12.09 MiB  max|err| 0  PASS
+  up_proj    K= 2048 N=11008   12.09 MiB  max|err| 0  PASS
+  down_proj  K=11008 N= 2048   12.09 MiB  max|err| 0  PASS
+
+--- per-operator cost, measured in isolation (what greedy is calibrated on) ---
+tensor          MiB      us/op     reps    instab     eff GB/s
+q_proj         2.25      80.92       93        1%         29.2
+k_proj         0.28      14.58     1782        1%         20.2
+v_proj         0.28      14.63     1747        1%         20.2
+o_proj         2.25      81.26      343        1%         29.0
+gate_proj     12.09     410.77       72        0%         30.9
+up_proj       12.09     410.62       71        0%         30.9
+down_proj     12.09     475.83       62        1%         26.7
+
+--- effective GB/s on weights: lane mapping x simdgroups-per-threadgroup ---
+  block-per-lane (8 weights per load, uncoalesced X)
+    tensor          MiB        1        2        4        8       16       32
+    q_proj         2.25     29.2     29.1     29.2     29.1     28.8     27.0
+    k_proj         0.28     23.1     23.1     22.1     20.2     19.6     19.5
+    v_proj         0.28     23.0     23.0     22.1     20.2     19.8     19.4
+    o_proj         2.25     29.0     29.1     29.2     29.2     28.9     27.0
+    gate_proj     12.09     30.7     30.7     30.9     30.9     30.8     30.6
+    up_proj       12.09     30.7     30.8     30.9     30.8     30.7     30.6
+    down_proj     12.09     26.2     26.3     26.6     26.6     26.6     24.7
+  weight-per-lane (1 weight per load, coalesced X)
+    tensor          MiB        1        2        4        8       16       32
+    q_proj         2.25     24.1     24.1     23.9     24.1     23.9     22.2
+    k_proj         0.28     17.5     17.5     16.7     15.4     15.4     15.4
+    v_proj         0.28     17.5     17.8     16.7     15.4     15.4     15.3
+    o_proj         2.25     24.2     24.3     24.1     24.1     24.0     22.4
+    gate_proj     12.09     25.4     25.4     25.4     25.4     25.4     25.1
+    up_proj       12.09     25.4     25.4     25.4     25.4     25.4     25.1
+    down_proj     12.09     24.2     24.3     24.1     24.1     24.1     22.5
+  (llama.cpp hardcodes nsg=2 for every tensor)
+
+--- per-operator cost at each tensor's best configuration ---
+tensor          MiB      us/op    instab   eff GB/s  best cfg  regime
+q_proj         2.25      81.40        0%       29.0  lm0/nsg1  ALU-BOUND
+k_proj         0.28      12.77        1%       23.1  lm0/nsg1  ALU-BOUND
+v_proj         0.28      12.82        1%       23.0  lm0/nsg1  ALU-BOUND
+o_proj         2.25      80.60        0%       29.3  lm0/nsg4  ALU-BOUND
+gate_proj     12.09     410.61        0%       30.9  lm0/nsg4  ALU-BOUND
+up_proj       12.09     409.65        0%       31.0  lm0/nsg4  ALU-BOUND
+down_proj     12.09     474.49        0%       26.7  lm0/nsg8  ALU-BOUND
+
+--- additivity: measured sequence vs sum of isolated costs ---
+sequence                                      measured  greedy sum       gap   instab
+gate_proj+up_proj+down_proj                  1305.76 us   1294.75 us     +0.9%       0%
+q_proj+k_proj+v_proj                          108.32 us    106.99 us     +1.2%       0%
+q_proj+gate_proj                              492.49 us    492.01 us     +0.1%       0%
+q_proj+k_proj+v_proj+o_proj+gate_proj+up_proj+down_proj   1498.85 us   1482.33 us     +1.1%       1%
+
+--- verdict ---
+  largest additivity gap : +1.2%  (q_proj+k_proj+v_proj)
+  worst per-op instability: 1%
+  => cost is approximately additive on these shapes; per-operator
+     optimization is close to optimal and plan selection buys little

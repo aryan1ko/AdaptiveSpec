@@ -71,3 +71,41 @@ Decision rule for end of week 2:
 - knees present and moving with shape → build the controller
 - flat to `ne11` = 16 → just max the draft length, drop the controller
 - linear → speculation doesn't pay on this hardware, and that's the result
+
+## D3: Plan-level optimization rejected; the bottleneck is dequantization
+2026-11-26 · supersedes the direction implied by D2
+
+An expansion was considered: a cost-based execution plan optimizer over a transformer
+subgraph, enumerating fusion boundaries, intermediate layouts and kernel configurations
+jointly rather than per operator. EXP-002 was run as a gate on it.
+
+The gate failed. Measured non-additivity is **+4.5% at R=1 and +1.2% at R=4**, at 0-2%
+instability. Meanwhile kernel-level choices measured on the same hardware:
+
+| Effect | Size |
+|---|---|
+| lane mapping inside one kernel | **2.9x** |
+| cost of R=1 -> R=4 vs the roofline ideal | **3.1x vs 1.0x** |
+| plan-level operator interaction | **1-5%** |
+
+Kernel-level leverage is roughly 60x larger than anything plan selection could recover.
+A plan optimizer would also be untestable until the kernel is memory-bound, which is the
+kernel work anyway, so it is gated behind that regardless.
+
+Also rejected on grounds of prior art: ggml already has a graph optimizer doing the
+standard fusions; TASO (SOSP'19) and Mirage (OSDI'25) already do cost-based graph
+substitution with far more sophistication than four weeks allows.
+
+### Revised direction
+EXP-002 Results 3 and 4 point somewhere better. The common claim that decode is
+memory-bandwidth-bound holds here only for tensors that exceed the 8 MB system cache. For
+cache-resident tensors, which are four of the seven matmuls in every Qwen2.5-3B layer,
+Q4_0 GEMV is compute-bound on dequantization and sits at 8-11% of its achievable
+bandwidth. Consequently extra columns cost 77-90% of full price instead of being nearly
+free, which undercuts the premise speculative decoding depends on.
+
+The problem is therefore: close the dequantization gap for cache-resident quantized GEMV,
+and measure whether that restores the near-free scaling in R that makes speculation pay.
+The adaptive component survives in a narrower and now measured form: which regime a
+tensor is in is a function of its footprint, and the right kernel and the right R differ
+between regimes inside a single layer.
