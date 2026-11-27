@@ -44,8 +44,8 @@ Alternatives not taken:
 ## D2: Revision after EXP-001
 2026-11-26
 
-D1 assumed `ne11 <= 8` would turn out mistuned on M3. Measured crossover is 9.0 columns,
-so it's about right. That framing is withdrawn.
+D1 assumed `ne11 <= 8` would turn out mistuned on M3. Measured crossover is 8.6-9.0
+columns across runs, so the constant is approximately correct. That framing is withdrawn.
 
 What replaced it: the ridge point moves 10.3x between cache-resident and streaming, and
 Qwen2.5-3B's decode tensors span 43x in footprint inside a single layer, straddling the

@@ -1,7 +1,12 @@
 # AdaptiveSpec
 
-Measuring how small-batch quantized matmul should be dispatched on Apple Silicon, and
-using that to pick the draft length for speculative decoding.
+Small-batch quantized matmul dispatch on Apple Silicon, and the speculative decoding
+draft length, both chosen from measurement rather than from fixed constants.
+
+**Approach.** Measure the real cost of verifying γ tokens on a given machine, fit a model
+that predicts it, and use that model to select both the GPU kernel configuration and the
+draft length at runtime — replacing compile-time constants that cannot account for tensor
+footprint or the characteristics of the target GPU.
 
 ## Problem
 
@@ -48,7 +53,9 @@ Q4_0 costs 0.5625 bytes per weight, so a GEMV with `R` columns has arithmetic in
 lands around 9 columns, so γ ≈ 8. Run to run it moves between 8.6 and 9.0, since the
 DRAM plateau measurements carry 15-33% instability.
 
-So `ne11 <= 8` is roughly right on this machine. I expected to find it mistuned.
+That puts llama.cpp's `ne11 <= 8` close to correct here. The initial hypothesis was that
+this constant would prove mistuned on consumer Apple Silicon; it did not. That framing is
+recorded as withdrawn in `docs/DECISIONS.md`.
 
 The useful result is that the ridge point moves 10x between regimes, and Qwen2.5-3B's
 decode tensors straddle the boundary inside a single layer:
